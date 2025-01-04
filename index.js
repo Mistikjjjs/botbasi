@@ -1,72 +1,73 @@
-import {
-  makeWASocket,
-  useMultiFileAuthState,
-  Browsers,
-} from "@whiskeysockets/baileys";
-import { createInterface } from "node:readline";
-import pino from "pino";
-import { Collection } from "@discordjs/collection";
+const TelegramBot = require('node-telegram-bot-api');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const token = '7878507254:AAGZ4i6ZPAnQKqBH4qAO2n-XCMU6Dl5E-Us';
+const bot = new TelegramBot(token, {polling: true});
 
-// Interfaz para preguntas en consola
-const rl = createInterface({
-  input: process.stdin,
-  output: process.stdout,
+// Comando /start
+bot.onText(/\/start/, (msg) => {
+    const chatId = msg.chat.id;
+    bot.sendMessage(chatId, '¡Hola! Soy tu bot de Telegram. Usa /tiktok <URL> para descargar videos de TikTok.');
 });
 
-// Función para realizar preguntas
-const question = (txt) => new Promise((resolve) => rl.question(txt, resolve));
+// Comando /tiktok
+bot.onText(/\/tiktok (.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const url = match[1];
 
-async function connectToWhatsApp() {
-  // Usamos el estado de autenticación en múltiples archivos
-  const { state, saveCreds } = await useMultiFileAuthState("auth");
+    try {
+        const response = await axios.get(`https://darkcore-api.onrender.com/api/tiktok?url=${url}`);
+        const data = response.data.result;
 
-  // Creamos la conexión con el socket de WhatsApp usando Baileys
-  const socket = makeWASocket({
-    auth: state,
-    logger: pino({ level: "silent" }), // Configuración para desactivar los logs
-    browser: Browsers.appropriate("chrome"), // Usa un navegador adecuado
-  });
+        if (response.data.success) {
+            // Descargar el video
+            const videoPath = path.resolve(__dirname, 'video.mp4');
+            const videoWriter = fs.createWriteStream(videoPath);
+            const videoResponse = await axios({
+                url: data.mp4,
+                method: 'GET',
+                responseType: 'stream'
+            });
+            videoResponse.data.pipe(videoWriter);
+            await new Promise((resolve, reject) => {
+                videoWriter.on('finish', resolve);
+                videoWriter.on('error', reject);
+            });
 
-  socket.commands = new Collection();
+            // Descargar el audio
+            const audioPath = path.resolve(__dirname, 'audio.mp3');
+            const audioWriter = fs.createWriteStream(audioPath);
+            const audioResponse = await axios({
+                url: data.mp3,
+                method: 'GET',
+                responseType: 'stream'
+            });
+            audioResponse.data.pipe(audioWriter);
+            await new Promise((resolve, reject) => {
+                audioWriter.on('finish', resolve);
+                audioWriter.on('error', reject);
+            });
 
-  // Si no está registrado, pedimos el número y el código de emparejamiento
-  if (!socket.authState.creds.registered) {
-    const number = await question("Escribe tu número de WhatsApp: ");
-    const formatNumber = number.replace(/[\s+\-()]/g, "");
-    const code = await socket.requestPairingCode(formatNumber);
-    console.log(`Tu código de conexión es: ${code}`);
-  }
+            // Enviar el video y el audio
+            await bot.sendVideo(chatId, videoPath, {caption: `📹 *Título:* ${data.titulo}\n👤 *Autor:* ${data.author}`, parse_mode: 'Markdown'});
+            await bot.sendAudio(chatId, audioPath);
 
-  // Configuración de comandos
-  socket.commands.set("ping", async (m) => {
-    await socket.sendMessage(m.key.remoteJid, { text: "Pong!" });
-  });
-
-  socket.commands.set("hola", async (m) => {
-    await socket.sendMessage(m.key.remoteJid, { text: "¡Hola! ¿Cómo puedo ayudarte?" });
-  });
-
-  socket.commands.set("adios", async (m) => {
-    await socket.sendMessage(m.key.remoteJid, { text: "¡Hasta luego!" });
-  });
-
-  // Escuchar mensajes entrantes y procesarlos
-  socket.ev.on("messages.upsert", async ({ messages }) => {
-    const message = messages[0];
-    if (message.message && message.message.conversation) {
-      const text = message.message.conversation.toLowerCase(); // Convertir a minúsculas
-      const command = text.split(" ")[0];  // Extraer el primer "palabra" (comando)
-
-      // Verificar si el comando existe en la colección de comandos
-      if (socket.commands.has(command)) {
-        await socket.commands.get(command)(message);
-      }
+            // Eliminar los archivos locales
+            fs.unlinkSync(videoPath);
+            fs.unlinkSync(audioPath);
+        } else {
+            bot.sendMessage(chatId, 'No se pudo descargar el video. Por favor, verifica la URL e inténtalo de nuevo.');
+        }
+    } catch (error) {
+        bot.sendMessage(chatId, 'Ocurrió un error al procesar tu solicitud. Por favor, inténtalo de nuevo más tarde.');
     }
-  });
+});
 
-  // Guardar las credenciales de autenticación al actualizar
-  socket.ev.on("creds.update", saveCreds);
-}
-
-// Conectar el bot a WhatsApp
-connectToWhatsApp().catch(console.error);
+// Manejar otros mensajes
+bot.on('message', (msg) => {
+    const chatId = msg.chat.id;
+    if (!msg.text.startsWith('/')) {
+        bot.sendMessage(chatId, 'Comando no reconocido. Usa /tiktok <URL> para descargar videos de TikTok.');
+    }
+});
