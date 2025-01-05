@@ -1,73 +1,51 @@
-const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const token = '7878507254:AAGZ4i6ZPAnQKqBH4qAO2n-XCMU6Dl5E-Us';
-const bot = new TelegramBot(token, {polling: true});
+const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const qrcode = require('qrcode-terminal');
 
-// Comando /start
-bot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
-    bot.sendMessage(chatId, '¡Hola! Soy tu bot de Telegram. Usa /tiktok <URL> para descargar videos de TikTok.');
-});
+async function connectToWhatsApp() {
+    const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: true
+    });
 
-// Comando /tiktok
-bot.onText(/\/tiktok (.+)/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const url = match[1];
+    sock.ev.on('creds.update', saveCreds);
 
-    try {
-        const response = await axios.get(`https://darkcore-api.onrender.com/api/tiktok?url=${url}`);
-        const data = response.data.result;
+    // Manejar mensajes entrantes
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        const msg = messages[0];
+        if (!msg.message) return;
 
-        if (response.data.success) {
-            // Descargar el video
-            const videoPath = path.resolve(__dirname, 'video.mp4');
-            const videoWriter = fs.createWriteStream(videoPath);
-            const videoResponse = await axios({
-                url: data.mp4,
-                method: 'GET',
-                responseType: 'stream'
-            });
-            videoResponse.data.pipe(videoWriter);
-            await new Promise((resolve, reject) => {
-                videoWriter.on('finish', resolve);
-                videoWriter.on('error', reject);
-            });
+        const sender = msg.key.remoteJid;
+        const messageType = Object.keys(msg.message)[0];
+        const messageContent = msg.message.conversation || msg.message[messageType].caption || '';
 
-            // Descargar el audio
-            const audioPath = path.resolve(__dirname, 'audio.mp3');
-            const audioWriter = fs.createWriteStream(audioPath);
-            const audioResponse = await axios({
-                url: data.mp3,
-                method: 'GET',
-                responseType: 'stream'
-            });
-            audioResponse.data.pipe(audioWriter);
-            await new Promise((resolve, reject) => {
-                audioWriter.on('finish', resolve);
-                audioWriter.on('error', reject);
-            });
+        console.log('Mensaje recibido de:', sender);
+        console.log('Tipo de mensaje:', messageType);
+        console.log('Contenido del mensaje:', messageContent);
 
-            // Enviar el video y el audio
-            await bot.sendVideo(chatId, videoPath, {caption: `📹 *Título:* ${data.titulo}\n👤 *Autor:* ${data.author}`, parse_mode: 'Markdown'});
-            await bot.sendAudio(chatId, audioPath);
-
-            // Eliminar los archivos locales
-            fs.unlinkSync(videoPath);
-            fs.unlinkSync(audioPath);
-        } else {
-            bot.sendMessage(chatId, 'No se pudo descargar el video. Por favor, verifica la URL e inténtalo de nuevo.');
+        // Manejar comando /hola
+        if (messageContent.toLowerCase() === '/hola') {
+            const response = 'Hola, ¿cómo estás?';
+            await sock.sendMessage(sender, { text: response });
         }
-    } catch (error) {
-        bot.sendMessage(chatId, 'Ocurrió un error al procesar tu solicitud. Por favor, inténtalo de nuevo más tarde.');
-    }
-});
+    });
 
-// Manejar otros mensajes
-bot.on('message', (msg) => {
-    const chatId = msg.chat.id;
-    if (!msg.text.startsWith('/')) {
-        bot.sendMessage(chatId, 'Comando no reconocido. Usa /tiktok <URL> para descargar videos de TikTok.');
-    }
+    // Manejar desconexiones
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut : false;
+            console.log('Conexión cerrada, intentando reconectar...', shouldReconnect);
+            if (shouldReconnect) {
+                connectToWhatsApp();
+            }
+        } else if (connection === 'open') {
+            console.log('Conectado exitosamente a WhatsApp');
+        }
+    });
+}
+
+connectToWhatsApp().catch(err => {
+    console.error('Error al conectar a WhatsApp:', err);
 });
